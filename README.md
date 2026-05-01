@@ -129,9 +129,11 @@ These are hard project boundaries. Any feature that crosses them belongs in a di
 
 ## Status
 
-V3.1 spine is complete. The only spec section not implemented is **§7 Behavior Stability** — the spec names the metric but does not numerically define it. Deferred deliberately rather than invented casually.
+V3.1 spine is complete and runs without any AI keys. The only environment variable is `DATABASE_URL`. The TradeGate is a deterministic rule pipeline; DisciplineScore is a weighted aggregation; Pattern Detection is a database aggregation; Thesis/PathStep/OverrideFlow/ViewPnLFlow are deterministic state machines. Nothing here calls an LLM.
 
-The next chapter (separate from V3.1) is a management UI for authoring `Thesis → Variables → Path → Steps → Triggers`. Currently authoring is only via the seed route or raw SQL.
+The only spec section not implemented is **§7 Behavior Stability** — the spec names the metric but does not numerically define it. Deferred deliberately.
+
+Forward plans (Management UI, Behavior Stability, **V3.2 candidate: AI integration at four specific seams**) are scoped in [`docs/roadmap.md`](docs/roadmap.md).
 
 ---
 
