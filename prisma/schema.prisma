@@ -1,0 +1,366 @@
+// 投资判断审计系统 V3.1 — core schema
+// Design principle: model the audit trail and the constraint state machines, not P&L.
+// Every entity here exists to make deviation harder or visible.
+
+generator client {
+  provider = "prisma-client"
+  output   = "../lib/generated/prisma"
+}
+
+datasource db {
+  provider = "sqlite"
+}
+
+// ─── Thesis layer ────────────────────────────────────────────────────────────
+// A thesis is the WHY behind any position. No position may exist without one.
+
+enum ThesisStatus {
+  active
+  broken_candidate
+  broken
+}
+
+model Thesis {
+  id          String       @id @default(cuid())
+  name        String
+  description String?
+  status      ThesisStatus @default(active)
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+  brokenAt    DateTime?
+
+  variables Variable[]
+  paths     Path[]
+  positions Position[]
+}
+
+// ─── Variable: the assumptions a thesis depends on ───────────────────────────
+// Variable.observedDir reversing assumedDir flips Thesis to broken_candidate.
+// Core variable invalid OR aiBreakRisk=high flips Thesis to broken.
+
+enum VariableDirection {
+  up
+  down
+  flat
+}
+
+enum BreakRisk {
+  low
+  medium
+  high
+}
+
+enum VariableStatus {
+  valid
+  invalid
+}
+
+model Variable {
+  id          String             @id @default(cuid())
+  thesisId    String
+  name        String
+  assumedDir  VariableDirection
+  observedDir VariableDirection?
+  isCore      Boolean            @default(false)
+  aiBreakRisk BreakRisk          @default(low)
+  status      VariableStatus     @default(valid)
+  notes       String?
+  createdAt   DateTime           @default(now())
+  updatedAt   DateTime           @updatedAt
+
+  thesis Thesis @relation(fields: [thesisId], references: [id], onDelete: Cascade)
+
+  @@index([thesisId])
+  @@index([status])
+}
+
+// ─── Path: the planned execution sequence ────────────────────────────────────
+// PathType differentiates audit strictness (see TradeGate).
+
+enum PathType {
+  long_term
+  mid_term
+  short_term
+  event_driven
+}
+
+enum PathStatus {
+  active
+  completed
+  broken
+  abandoned
+}
+
+model Path {
+  id          String     @id @default(cuid())
+  thesisId    String
+  type        PathType
+  name        String
+  description String?
+  status      PathStatus @default(active)
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+
+  thesis    Thesis     @relation(fields: [thesisId], references: [id], onDelete: Cascade)
+  steps     PathStep[]
+  triggers  Trigger[]
+  positions Position[]
+
+  @@index([thesisId])
+  @@index([status])
+}
+
+enum PathStepStatus {
+  pending
+  active
+  completed
+  skipped
+}
+
+model PathStep {
+  id          String         @id @default(cuid())
+  pathId      String
+  order       Int
+  description String
+  criteria    String
+  status      PathStepStatus @default(pending)
+  createdAt   DateTime       @default(now())
+  updatedAt   DateTime       @updatedAt
+
+  path          Path           @relation(fields: [pathId], references: [id], onDelete: Cascade)
+  triggers      Trigger[]
+  trades        Trade[]
+  overrideFlows OverrideFlow[]
+
+  @@unique([pathId, order])
+  @@index([pathId])
+  @@index([status])
+}
+
+// ─── Trigger: a condition that authorises a Trade ────────────────────────────
+// Auto-inserted Exit triggers (priority=1000) appear when Thesis goes broken.
+
+enum TriggerType {
+  entry
+  exit
+  add
+  reduce
+}
+
+enum TriggerConditionKind {
+  price
+  time
+  variable
+  manual
+}
+
+enum TriggerStatus {
+  pending
+  fired
+  expired
+  cancelled
+}
+
+model Trigger {
+  id             String               @id @default(cuid())
+  pathId         String
+  pathStepId     String?
+  type           TriggerType
+  priority       Int                  @default(0)
+  conditionKind  TriggerConditionKind
+  conditionExpr  String
+  referenceValue Decimal?
+  status         TriggerStatus        @default(pending)
+  autoInserted   Boolean              @default(false)
+  createdAt      DateTime             @default(now())
+  firedAt        DateTime?
+
+  path     Path      @relation(fields: [pathId], references: [id], onDelete: Cascade)
+  pathStep PathStep? @relation(fields: [pathStepId], references: [id], onDelete: SetNull)
+  trades   Trade[]
+
+  @@index([pathId])
+  @@index([pathStepId])
+  @@index([status])
+  @@index([priority])
+}
+
+// ─── Position: actual exposure ───────────────────────────────────────────────
+// costBasis is stored for ViewPnLFlow but never exposed in default UI.
+
+enum PositionSide {
+  long
+  short
+}
+
+enum PositionStatus {
+  open
+  closed
+  liquidating
+}
+
+model Position {
+  id         String         @id @default(cuid())
+  thesisId   String
+  pathId     String
+  symbol     String
+  side       PositionSide
+  size       Decimal
+  costBasis  Decimal
+  riskBudget Decimal?
+  status     PositionStatus @default(open)
+  openedAt   DateTime       @default(now())
+  closedAt   DateTime?
+  updatedAt  DateTime       @updatedAt
+
+  thesis       Thesis        @relation(fields: [thesisId], references: [id])
+  path         Path          @relation(fields: [pathId], references: [id])
+  trades       Trade[]
+  deviations   Deviation[]
+  viewPnLFlows ViewPnLFlow[]
+
+  @@index([thesisId])
+  @@index([pathId])
+  @@index([status])
+  @@index([symbol])
+}
+
+// ─── Trade: an action that passed (or failed) the TradeGate ──────────────────
+// gateDecisionKind records what the gate said. status records what happened.
+
+enum TradeIntent {
+  buy
+  sell
+  add
+  reduce
+  exit
+}
+
+enum TradeStatus {
+  requested
+  gated
+  cooldown
+  executed
+  aborted
+}
+
+enum GateDecisionKind {
+  allowed
+  blocked
+  requires_override
+  cooldown
+}
+
+model Trade {
+  id                 String            @id @default(cuid())
+  positionId         String
+  pathStepId         String?
+  triggerId          String?
+  intent             TradeIntent
+  size               Decimal
+  price              Decimal?
+  status             TradeStatus       @default(requested)
+  gateDecisionKind   GateDecisionKind?
+  gateDecisionReason String?
+  overrideFlowId     String?           @unique
+  reviewedAt         DateTime?
+  reviewNotes        String?
+  createdAt          DateTime          @default(now())
+  executedAt         DateTime?
+
+  position     Position      @relation(fields: [positionId], references: [id])
+  pathStep     PathStep?     @relation(fields: [pathStepId], references: [id], onDelete: SetNull)
+  trigger      Trigger?      @relation(fields: [triggerId], references: [id], onDelete: SetNull)
+  overrideFlow OverrideFlow? @relation(fields: [overrideFlowId], references: [id])
+  deviations   Deviation[]
+
+  @@index([positionId])
+  @@index([pathStepId])
+  @@index([status])
+  @@index([createdAt])
+}
+
+// ─── Deviation: weighted record of off-discipline behavior ───────────────────
+// `type` keys into a weight table at the application layer (DeviationWeight).
+
+model Deviation {
+  id          String   @id @default(cuid())
+  tradeId     String?
+  positionId  String?
+  type        String
+  weight      Int
+  description String
+  createdAt   DateTime @default(now())
+
+  trade    Trade?    @relation(fields: [tradeId], references: [id], onDelete: SetNull)
+  position Position? @relation(fields: [positionId], references: [id], onDelete: SetNull)
+
+  @@index([type])
+  @@index([createdAt])
+}
+
+// ─── OverrideFlow: the multi-step friction state machine for forcing a trade ─
+// reason ≥30 chars and confirmationStage progression are enforced at the
+// service layer, not by the schema.
+
+enum OverrideSeverity {
+  low
+  medium
+  high
+}
+
+enum OverrideFlowStatus {
+  pending
+  cooldown
+  confirmed
+  executed
+  aborted
+}
+
+model OverrideFlow {
+  id                String             @id @default(cuid())
+  pathStepId        String
+  severity          OverrideSeverity
+  cooldownSeconds   Int
+  reason            String
+  overrideType      String
+  confirmationStage Int                @default(0)
+  status            OverrideFlowStatus @default(pending)
+  cooldownStartsAt  DateTime?
+  confirmedAt       DateTime?
+  executedAt        DateTime?
+  abortedAt         DateTime?
+  createdAt         DateTime           @default(now())
+  updatedAt         DateTime           @updatedAt
+
+  pathStep PathStep  @relation(fields: [pathStepId], references: [id], onDelete: Cascade)
+  trade    Trade?
+
+  @@index([status])
+  @@index([pathStepId])
+}
+
+// ─── ViewPnLFlow: friction layer for looking at P&L ──────────────────────────
+// Triggered when user requests P&L view. Unlocks for 60s after confirm + reason ≥20 chars.
+
+enum ViewPnLFlowStatus {
+  pending
+  unlocked
+  expired
+}
+
+model ViewPnLFlow {
+  id         String            @id @default(cuid())
+  positionId String
+  reason     String
+  status     ViewPnLFlowStatus @default(pending)
+  currentPrice Decimal?
+  unlockedAt DateTime?
+  expiresAt  DateTime?
+  createdAt  DateTime          @default(now())
+
+  position Position @relation(fields: [positionId], references: [id], onDelete: Cascade)
+
+  @@index([positionId])
+  @@index([status])
+}
